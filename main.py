@@ -282,12 +282,23 @@ PLAYER_SPEED = 3
 # cooldown system
 shoot_cooldown = 0.0  # time until next shot allowed
 SHOOT_DELAY = 0.25  # cooldown between shots in seconds
+# quality-of-life globals
+popups = []  # floating text popups (e.g., +10)
+paused = False
+MAGNET_RADIUS = 140
+MAGNET_STRENGTH = 0.12
+MINIMAP_W = 160
+MINIMAP_H = 100
+# shield globals
+SHIELD_DURATION = 2.0
+shield_end_time = 0.0
+shield_active = False
 # default settings (editable from settings menu)
 SETTINGS = {
     "player_speed": PLAYER_SPEED,
     "enemy_count": 15,
     "enemy_speed": 1.2,
-    "fps_limit": 60,
+    "fps_limit": 120,
     "max_ammo": 10,
     "bullet_speed": 5,
 }
@@ -311,15 +322,40 @@ class Player:
         else:
             # small, unobtrusive fallback marker (no large glow)
             pygame.draw.circle(display, white, (int(screen_x), int(screen_y)), int(6 * game_zoom))
-        # draw a small health bar above the player
-        bar_w = 36 * game_zoom
-        bar_h = 6 * game_zoom
+        # draw a clearer health bar and ammo counter above the player's head
+        bar_w = 64 * game_zoom
+        bar_h = 8 * game_zoom
         hp_ratio = max(0, self.hp) / self.max_hp
         bx = screen_x - bar_w/2
-        by = screen_y - 18 * game_zoom
-        pygame.draw.rect(display, ocean_dark, (bx, by, bar_w, bar_h))
+        by = screen_y - 26 * game_zoom
+        # background
+        pygame.draw.rect(display, ocean_dark, (bx - 1, by - 1, bar_w + 2, bar_h + 2))
+        # empty bar
+        pygame.draw.rect(display, (60, 60, 60), (bx, by, bar_w, bar_h))
+        # filled hp
         hp_color = (int(255*(1-hp_ratio)), int(255*hp_ratio), 40) if hp_ratio < 0.5 else biolum
         pygame.draw.rect(display, hp_color, (bx, by, int(bar_w * hp_ratio), bar_h))
+        # numeric hp label
+        hp_label = font.render(f"HP: {self.hp}/{self.max_hp}", True, white)
+        display.blit(hp_label, (int(screen_x - hp_label.get_width()/2), int(by - hp_label.get_height())))
+        # ammo counter to the right of the HP bar
+        try:
+            ammo_text = f"Ammo: {AMMO}/{MAX_AMMO}"
+        except Exception:
+            ammo_text = "Ammo: ?"
+        ammo_surf = font.render(ammo_text, True, foam)
+        display.blit(ammo_surf, (int(bx + bar_w + 6 * game_zoom), int(by)))
+        # draw shield bubble if active
+        try:
+            rem = max(0.0, shield_end_time - time.time())
+        except Exception:
+            rem = 0.0
+        if rem > 0:
+            # radius shrinks as remaining time approaches zero
+            max_r = 42 * game_zoom
+            radius = max(2, int(max_r * (rem / SHIELD_DURATION)))
+            width = max(1, int(3 * game_zoom))
+            pygame.draw.circle(display, ocean_accent, (int(screen_x), int(screen_y)), radius, width)
     # convenience: keep inside bounds
     def clamp(self, w, h):
         self.x = max(0, min(self.x, w))
@@ -469,9 +505,11 @@ def make_particles(x, y, color, n=10):
             'size': random.uniform(1.5, 4)  # larger particlesw
         })
 
-def spawn_enemies(count):
+def spawn_enemies(count, append=False):
     # spawn enemies relative to the player's current position so gameplay is more intense
-    enemies.clear()
+    # if append==False replace current enemies, otherwise add to them
+    if not append:
+        enemies.clear()
     px = player.x
     py = player.y
     # spawn radius around player (min, max)
@@ -672,7 +710,7 @@ while running:
                 if event.button == 1:  # left click
                     now = time.time()
                     # check shooting cooldown and ensure not reloading
-                    if now >= shoot_cooldown and now >= reload_cooldown:
+                    if not paused and now >= shoot_cooldown and now >= reload_cooldown:
                         mouse_x, mouse_y = pygame.mouse.get_pos()
                         # convert screen coords to world coords
                         world_mx, world_my = screen_to_world(mouse_x, mouse_y)
@@ -697,6 +735,18 @@ while running:
                     if now >= reload_cooldown and AMMO < MAX_AMMO:
                         AMMO = MAX_AMMO
                         reload_cooldown = now + RELOAD_TIME
+                # pause toggle
+                if event.key == pygame.K_p:
+                    paused = not paused
+                # debug: spawn 20 additional enemies (append)
+                if event.key == pygame.K_2:
+                    spawn_enemies(20, append=True)
+                # shield activation
+                if event.key == pygame.K_f:
+                    now = time.time()
+                    # start shield for SHIELD_DURATION
+                    shield_end_time = now + SHIELD_DURATION
+                    shield_active = True
 
     # handle continuous key presses for movement (only in game scene)
     keys = pygame.key.get_pressed()
@@ -757,124 +807,237 @@ while running:
     elif scene == 'game':
         # update camera to follow player FIRST, before rendering anything
         update_camera(player.x, player.y)
+        # update shield state
+        try:
+            if shield_end_time <= time.time():
+                shield_active = False
+        except Exception:
+            shield_active = False
         
         # draw tiled world background
         draw_tiles()
         
-        # update/draw enemies and check collisions with player
-        for e in enemies:
-            e.speed = SETTINGS['enemy_speed']
-            if e.alive:
-                e.update(player, enemies)
-            else:
-                # death animation update
-                e.death_time += 1
-            e.draw()
-            # enemy-player collision
-            if e.alive:
-                dx = e.x - player.x
-                dy = e.y - player.y
-                if (dx*dx + dy*dy) <= (10 + 6) ** 2:
-                    # enemy hits player
-                    e.alive = False
-                    e.death_time = 0  # start death animation
-                    player.hp -= 1
-                    make_particles(e.x, e.y, e.color, n=12)
-                    spawn_pickup(e.x, e.y, 'coin')
-
-        # update bullets and collisions (bullets can destroy enemies)
-        for b in bullets[:]:
-            b.update()
-            # remove out-of-world bullets
-            if b.x < 0 or b.x > WORLD_WIDTH or b.y < 0 or b.y > WORLD_HEIGHT:
-                bullets.remove(b)
-                continue
-            # check collision with enemies
-            hit = False
+        # paused drawing: when paused, render current scene but skip updates
+        if paused:
             for e in enemies:
-                if e.alive and e.collide_with_bullet(b):
-                    e.alive = False
-                    e.death_time = 0  # start death animation
-                    # reward player
-                    score += 5
-                    # cooler particle effect with more particles
-                    make_particles(e.x, e.y, e.color, n=20)
-                    # random pickup drop
-                    r = random.random()
-                    if r < 0.35:
-                        spawn_pickup(e.x, e.y, 'coin')
-                    elif r < 0.7:
-                        spawn_pickup(e.x, e.y, 'ammo')
-                    else:
-                        spawn_pickup(e.x, e.y, 'health')
-                    if b in bullets:
-                        bullets.remove(b)
-                    hit = True
-                    break
-            if not hit and b in bullets:
+                e.draw()
+            for b in bullets:
                 b.draw()
-
-        # update pickups
-        for p in pickups[:]:
-            p['ttl'] -= 1
-            if p['ttl'] <= 0:
-                try:
-                    pickups.remove(p)
-                except ValueError:
-                    pass
-                continue
-            # draw pickup with shrink-on-pickup behavior
-            kind = p['kind']
-            color = (255, 220, 80) if kind == 'coin' else (120, 255, 160) if kind == 'ammo' else (255, 100, 120)
-            screen_px, screen_py = world_to_screen(p['x'], p['y'])
-            # if already picked, shrink until consumed
-            if p.get('picked'):
-                p['size'] = max(0, p.get('size', 6 * game_zoom) - p.get('shrink_rate', 0.35))
-                sz = int(max(1, p['size']))
+            for p in pickups:
+                kind = p['kind']
+                color = (255, 220, 80) if kind == 'coin' else (120, 255, 160) if kind == 'ammo' else (255, 100, 120)
+                screen_px, screen_py = world_to_screen(p['x'], p['y'])
+                sz = int(p.get('size', 6 * game_zoom))
                 pygame.draw.circle(display, color, (int(screen_px), int(screen_py)), sz)
-                # small particles while shrinking
-                if random.random() < 0.25:
-                    make_particles(p['x'] + random.uniform(-4,4), p['y'] + random.uniform(-4,4), color, n=1)
-                if p['size'] <= 0:
-                    # apply pickup effect when shrink completes
-                    if kind == 'coin':
-                        score += 10
-                    elif kind == 'ammo':
-                        AMMO = min(MAX_AMMO, AMMO + max(3, MAX_AMMO // 2))
-                    elif kind == 'health':
-                        player.hp = min(player.max_hp, player.hp + 2)
+            for q in particles:
+                screen_px, screen_py = world_to_screen(q['x'], q['y'])
+                alpha_ratio = q['life'] / q['max_life'] if q.get('max_life') else 1
+                fade_size = int(q.get('size', 2) * game_zoom * alpha_ratio)
+                if fade_size > 0:
+                    pygame.draw.circle(display, q['color'], (int(screen_px), int(screen_py)), fade_size)
+            # draw player, gun and HUD (static)
+            player.draw()
+            if 'gun_sprite' in globals() and gun_sprite:
+                mx, my = pygame.mouse.get_pos()
+                world_mx, world_my = screen_to_world(mx, my)
+                ang = math.degrees(math.atan2(world_my - player.y, world_mx - player.x))
+                w, h = gun_sprite.get_size()
+                w_scaled = int(w * game_zoom)
+                h_scaled = int(h * game_zoom)
+                gun_scaled = pygame.transform.scale(gun_sprite, (w_scaled, h_scaled))
+                rot = pygame.transform.rotate(gun_scaled, -ang)
+                player_screen_x, player_screen_y = world_to_screen(player.x, player.y)
+                rrect = rot.get_rect(center=(int(player_screen_x), int(player_screen_y)))
+                display.blit(rot, rrect.topleft)
+            # HUD (ammo / reload progress)
+            now = time.time()
+            if now < reload_cooldown:
+                remaining = max(0, reload_cooldown - now)
+                progress = 1 - (remaining / RELOAD_TIME)
+                bar_w = 120
+                bar_h = 10
+                bx = 5
+                by = 25
+                pygame.draw.rect(display, ocean_med, (bx, by, bar_w, bar_h))
+                pygame.draw.rect(display, foam, (bx, by, int(bar_w * progress), bar_h))
+                reload_surf = font.render("Reloading...", True, coral)
+                display.blit(reload_surf, (5, 25 + bar_h + 2))
+            else:
+                ammo_surf = font.render(f"Ammo: {AMMO} (R to reload)", True, foam)
+                display.blit(ammo_surf, (5, 25))
+            # draw popups
+            for popup in popups[:]:
+                popup['y'] += popup.get('vy', -0.4)
+                popup['life'] -= 1
+                if popup['life'] <= 0:
+                    popups.remove(popup)
+                    continue
+                sx, sy = world_to_screen(popup['x'], popup['y'])
+                alpha = max(0, int(255 * (popup['life'] / 60)))
+                txt = font.render(popup['text'], True, popup.get('color', foam))
+                display.blit(txt, (int(sx - txt.get_width() / 2), int(sy)))
+            # minimap (static)
+            map_x = window_res[0] - MINIMAP_W - 8
+            map_y = 8
+            pygame.draw.rect(display, ocean_med, (map_x, map_y, MINIMAP_W, MINIMAP_H))
+            pygame.draw.rect(display, foam, (map_x, map_y, MINIMAP_W, MINIMAP_H), 1)
+            scale_x = MINIMAP_W / WORLD_WIDTH
+            scale_y = MINIMAP_H / WORLD_HEIGHT
+            # enemies
+            for e in enemies:
+                ex = map_x + int(e.x * scale_x)
+                ey = map_y + int(e.y * scale_y)
+                pygame.draw.circle(display, coral if e.alive else (60,60,60), (ex, ey), 2)
+            # player
+            px = map_x + int(player.x * scale_x)
+            py = map_y + int(player.y * scale_y)
+            pygame.draw.circle(display, biolum, (px, py), 3)
+            # paused overlay
+            overlay = pygame.Surface((window_res[0], window_res[1]), pygame.SRCALPHA)
+            overlay.fill((5, 5, 10, 120))
+            display.blit(overlay, (0, 0))
+            pause_surf = big_font.render('PAUSED', True, foam)
+            display.blit(pause_surf, (window_res[0]//2 - pause_surf.get_width()//2, window_res[1]//2 - pause_surf.get_height()//2))
+        else:
+            # update/draw enemies and check collisions with player
+            for e in enemies:
+                e.speed = SETTINGS['enemy_speed']
+                if e.alive:
+                    e.update(player, enemies)
+                else:
+                    # death animation update
+                    e.death_time += 1
+                e.draw()
+                # enemy-player collision
+                if e.alive:
+                    dx = e.x - player.x
+                    dy = e.y - player.y
+                    dist_ep = (dx*dx + dy*dy) ** 0.5
+                    if (dx*dx + dy*dy) <= (10 + 6) ** 2:
+                        # if shield is active, push enemy away and prevent damage
+                        rem = max(0.0, shield_end_time - time.time()) if 'shield_end_time' in globals() else 0.0
+                        if rem > 0:
+                            # push enemy away from player a bit
+                            if dist_ep == 0:
+                                nx, ny = random.uniform(-1,1), random.uniform(-1,1)
+                            else:
+                                nx, ny = dx / dist_ep, dy / dist_ep
+                            e.x += nx * 16
+                            e.y += ny * 16
+                            # small visual feedback
+                            make_particles(e.x, e.y, e.color, n=6)
+                        else:
+                            # enemy hits player
+                            e.alive = False
+                            e.death_time = 0  # start death animation
+                            player.hp -= 1
+                            make_particles(e.x, e.y, e.color, n=12)
+                            spawn_pickup(e.x, e.y, 'coin')
+
+            # update bullets and collisions (bullets can destroy enemies)
+            for b in bullets[:]:
+                b.update()
+                # remove out-of-world bullets
+                if b.x < 0 or b.x > WORLD_WIDTH or b.y < 0 or b.y > WORLD_HEIGHT:
+                    bullets.remove(b)
+                    continue
+                # check collision with enemies
+                hit = False
+                for e in enemies:
+                    if e.alive and e.collide_with_bullet(b):
+                        e.alive = False
+                        e.death_time = 0  # start death animation
+                        # reward player
+                        score += 5
+                        # cooler particle effect with more particles
+                        make_particles(e.x, e.y, e.color, n=20)
+                        # random pickup drop
+                        r = random.random()
+                        if r < 0.35:
+                            spawn_pickup(e.x, e.y, 'coin')
+                        elif r < 0.7:
+                            spawn_pickup(e.x, e.y, 'ammo')
+                        else:
+                            spawn_pickup(e.x, e.y, 'health')
+                        if b in bullets:
+                            bullets.remove(b)
+                        hit = True
+                        break
+                if not hit and b in bullets:
+                    b.draw()
+
+            # update pickups
+            for p in pickups[:]:
+                p['ttl'] -= 1
+                if p['ttl'] <= 0:
                     try:
                         pickups.remove(p)
                     except ValueError:
                         pass
-            else:
-                # normal (unpicked) draw
-                sz = int(p.get('size', 6 * game_zoom))
-                pygame.draw.circle(display, color, (int(screen_px), int(screen_py)), sz)
-                # pickup by player (initiate shrink instead of immediate remove)
-                dx = p['x'] - player.x
-                dy = p['y'] - player.y
-                if (dx*dx + dy*dy) <= (10 + 6) ** 2:
-                    p['picked'] = True
+                    continue
+                # magnet effect: pull pickups gently toward player when nearby
+                if not p.get('picked'):
+                    dxm = player.x - p['x']
+                    dym = player.y - p['y']
+                    mdist = (dxm*dxm + dym*dym) ** 0.5
+                    if mdist < MAGNET_RADIUS and mdist > 0:
+                        p['x'] += (dxm / mdist) * (MAGNET_STRENGTH * mdist)
+                        p['y'] += (dym / mdist) * (MAGNET_STRENGTH * mdist)
+                # draw pickup with shrink-on-pickup behavior
+                kind = p['kind']
+                color = (255, 220, 80) if kind == 'coin' else (120, 255, 160) if kind == 'ammo' else (255, 100, 120)
+                screen_px, screen_py = world_to_screen(p['x'], p['y'])
+                # if already picked, shrink until consumed
+                if p.get('picked'):
+                    p['size'] = max(0, p.get('size', 6 * game_zoom) - p.get('shrink_rate', 0.35))
+                    sz = int(max(1, p['size']))
+                    pygame.draw.circle(display, color, (int(screen_px), int(screen_py)), sz)
+                    # small particles while shrinking
+                    if random.random() < 0.25:
+                        make_particles(p['x'] + random.uniform(-4,4), p['y'] + random.uniform(-4,4), color, n=1)
+                    if p['size'] <= 0:
+                        # apply pickup effect when shrink completes
+                        if kind == 'coin':
+                            score += 10
+                            popups.append({'text': '+10', 'x': p['x'], 'y': p['y'] - 8, 'life': 60, 'vy': -0.6, 'color': foam})
+                        elif kind == 'ammo':
+                            AMMO = min(MAX_AMMO, AMMO + max(3, MAX_AMMO // 2))
+                            popups.append({'text': '+Ammo', 'x': p['x'], 'y': p['y'] - 8, 'life': 60, 'vy': -0.6, 'color': green})
+                        elif kind == 'health':
+                            player.hp = min(player.max_hp, player.hp + 2)
+                            popups.append({'text': '+HP', 'x': p['x'], 'y': p['y'] - 8, 'life': 60, 'vy': -0.6, 'color': red})
+                        try:
+                            pickups.remove(p)
+                        except ValueError:
+                            pass
+                else:
+                    # normal (unpicked) draw
+                    sz = int(p.get('size', 6 * game_zoom))
+                    pygame.draw.circle(display, color, (int(screen_px), int(screen_py)), sz)
+                    # pickup by player (initiate shrink instead of immediate remove)
+                    dx = p['x'] - player.x
+                    dy = p['y'] - player.y
+                    if (dx*dx + dy*dy) <= (10 + 6) ** 2:
+                        p['picked'] = True
 
-        # update particles
-        for q in particles[:]:
-            q['x'] += q['vx']
-            q['y'] += q['vy']
-            q['vy'] += 0.1
-            q['life'] -= 1
-            if q['life'] <= 0:
-                particles.remove(q)
-                continue
-            screen_px, screen_py = world_to_screen(q['x'], q['y'])
-            # fade out effect
-            alpha_ratio = q['life'] / q['max_life']
-            fade_size = int(q['size'] * game_zoom * alpha_ratio)
-            if fade_size > 0:
-                pygame.draw.circle(display, q['color'], (int(screen_px), int(screen_py)), fade_size)
-                # enhanced glow: brighter and larger (reduced intensity so bullets remain prominent)
-                glow_radius = int(fade_size * 3.5)
-                draw_glow((screen_px, screen_py), glow_radius, q['color'], 0.12 * alpha_ratio)
+            # update particles
+            for q in particles[:]:
+                q['x'] += q['vx']
+                q['y'] += q['vy']
+                q['vy'] += 0.1
+                q['life'] -= 1
+                if q['life'] <= 0:
+                    particles.remove(q)
+                    continue
+                screen_px, screen_py = world_to_screen(q['x'], q['y'])
+                # fade out effect
+                alpha_ratio = q['life'] / q['max_life']
+                fade_size = int(q['size'] * game_zoom * alpha_ratio)
+                if fade_size > 0:
+                    pygame.draw.circle(display, q['color'], (int(screen_px), int(screen_py)), fade_size)
+                    # enhanced glow: brighter and larger (reduced intensity so bullets remain prominent)
+                    glow_radius = int(fade_size * 3.5)
+                    draw_glow((screen_px, screen_py), glow_radius, q['color'], 0.12 * alpha_ratio)
 
         # draw player and HUD
         player.draw()
@@ -893,16 +1056,48 @@ while running:
             player_screen_x, player_screen_y = world_to_screen(player.x, player.y)
             rrect = rot.get_rect(center=(int(player_screen_x), int(player_screen_y)))
             display.blit(rot, rrect.topleft)
-        # show ammo, reload status and score
+        # show ammo, reload status and score (with progress bar)
         now = time.time()
         if now < reload_cooldown:
+            remaining = max(0, reload_cooldown - now)
+            progress = 1 - (remaining / RELOAD_TIME)
+            bar_w = 120
+            bar_h = 10
+            bx = 5
+            by = 25
+            pygame.draw.rect(display, ocean_med, (bx, by, bar_w, bar_h))
+            pygame.draw.rect(display, foam, (bx, by, int(bar_w * progress), bar_h))
             reload_surf = font.render("Reloading...", True, coral)
-            display.blit(reload_surf, (5, 25))
+            display.blit(reload_surf, (5, 25 + bar_h + 2))
         else:
             ammo_surf = font.render(f"Ammo: {AMMO} (R to reload)", True, foam)
             display.blit(ammo_surf, (5, 25))
         score_surf = font.render(f"Score: {score}", True, biolum)
         display.blit(score_surf, (5, 45))
+        # floating popups
+        for popup in popups[:]:
+            popup['y'] += popup.get('vy', -0.4)
+            popup['life'] -= 1
+            if popup['life'] <= 0:
+                popups.remove(popup)
+                continue
+            sx, sy = world_to_screen(popup['x'], popup['y'])
+            txt = font.render(popup['text'], True, popup.get('color', foam))
+            display.blit(txt, (int(sx - txt.get_width() / 2), int(sy)))
+        # minimap
+        map_x = window_res[0] - MINIMAP_W - 8
+        map_y = 8
+        pygame.draw.rect(display, ocean_med, (map_x, map_y, MINIMAP_W, MINIMAP_H))
+        pygame.draw.rect(display, foam, (map_x, map_y, MINIMAP_W, MINIMAP_H), 1)
+        scale_x = MINIMAP_W / WORLD_WIDTH
+        scale_y = MINIMAP_H / WORLD_HEIGHT
+        for e in enemies:
+            ex = map_x + int(e.x * scale_x)
+            ey = map_y + int(e.y * scale_y)
+            pygame.draw.circle(display, coral if e.alive else (60,60,60), (ex, ey), 2)
+        px = map_x + int(player.x * scale_x)
+        py = map_y + int(player.y * scale_y)
+        pygame.draw.circle(display, biolum, (px, py), 3)
 
         # check player death
         if player.hp <= 0:
