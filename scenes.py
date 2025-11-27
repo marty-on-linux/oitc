@@ -3,6 +3,8 @@ import sys
 import time
 import math
 import random
+import logging
+
 class Scene:
     def __init__(self, game):
         self.game = game
@@ -190,7 +192,7 @@ class GameScene(Scene):
                         world_mx, world_my = self.game.screen_to_world(mouse_x, mouse_y)
                         dir_x = world_mx - self.game.player.x
                         dir_y = world_my - self.game.player.y
-                        length = (dir_x**2 + dir_y**2) ** 0.5
+                        length = math.hypot(dir_x, dir_y)
                         if length != 0:
                             dir_x /= length
                             dir_y /= length
@@ -246,10 +248,7 @@ class GameScene(Scene):
         # update camera to follow player FIRST, before rendering anything
         self.game.update_camera(self.game.player.x, self.game.player.y)
         # update shield state
-        try:
-            if self.game.shield_end_time <= time.time():
-                self.game.shield_active = False
-        except Exception:
+        if self.game.shield_end_time <= time.time():
             self.game.shield_active = False
 
         # update/draw enemies and check collisions with player
@@ -264,11 +263,10 @@ class GameScene(Scene):
             if e.alive:
                 dx = e.x - self.game.player.x
                 dy = e.y - self.game.player.y
-                dist_ep = (dx*dx + dy*dy) ** 0.5
-                if (dx*dx + dy*dy) <= (10 + 6) ** 2:
+                dist_ep = math.hypot(dx, dy)
+                if dist_ep <= 16:
                     # if shield is active, push enemy away and prevent damage
-                    rem = max(0.0, self.game.shield_end_time - time.time()) if 'shield_end_time' in globals() else 0.0
-                    if rem > 0:
+                    if self.game.shield_active:
                         # push enemy away from player a bit
                         if dist_ep == 0:
                             nx, ny = random.uniform(-1,1), random.uniform(-1,1)
@@ -290,7 +288,7 @@ class GameScene(Scene):
         for b in self.game.bullets[:]:
             b.update()
             # remove out-of-world bullets
-            if b.x < 0 or b.x > self.game.WORLD_WIDTH or b.y < 0 or b.y > self.game.WORLD_HEIGHT:
+            if not (0 < b.x < self.game.WORLD_WIDTH and 0 < b.y < self.game.WORLD_HEIGHT):
                 self.game.bullets.remove(b)
                 continue
             # check collision with enemies
@@ -327,7 +325,7 @@ class GameScene(Scene):
             if not p.get('picked'):
                 dxm = self.game.player.x - p['x']
                 dym = self.game.player.y - p['y']
-                mdist = (dxm*dxm + dym*dym) ** 0.5
+                mdist = math.hypot(dxm, dym)
                 if mdist < self.game.MAGNET_RADIUS and mdist > 0:
                     p['x'] += (dxm / mdist) * (self.game.MAGNET_STRENGTH * mdist)
                     p['y'] += (dym / mdist) * (self.game.MAGNET_STRENGTH * mdist)
@@ -353,7 +351,7 @@ class GameScene(Scene):
                 # pickup by player (initiate shrink instead of immediate remove)
                 dx = p['x'] - self.game.player.x
                 dy = p['y'] - self.game.player.y
-                if (dx*dx + dy*dy) <= (10 + 6) ** 2:
+                if math.hypot(dx, dy) <= 16:
                     p['picked'] = True
 
         # update particles
@@ -380,9 +378,7 @@ class GameScene(Scene):
             self.game.scene = 'menu'
             self.game.player.hp = self.game.player.max_hp
         # remove dead enemies after death animation completes
-        for e in self.game.enemies[:]:
-            if not e.alive and e.death_time >= e.death_duration:
-                self.game.enemies.remove(e)
+        self.game.enemies = [e for e in self.game.enemies if e.alive or e.death_time < e.death_duration]
 
         # wave management: if all enemies are dead, schedule/advance wave
         alive = any(e.alive for e in self.game.enemies)
